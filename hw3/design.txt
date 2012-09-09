@@ -1,0 +1,184 @@
+
+TITLE : SYSCALL INHERIT
+DATE : 04/10/2012
+TEAM :
+	Ram Angara (rangara@cs.stonybrook.edu)
+	Hema Guruju (hguruju@cs.stonybrook.edu)
+	Maruthi Devarenti (mdevarenti@cs.stonybrook.edu)
+                                                                     
+-------------------------------------------------------------------------
+
+*  INTRODUCTION
+
+   The current Linux kernel only supports a predefined set of system calls. 
+   The handlers for these system calls are stored in the table sys_call_table
+   which is indexed using the system call number provided by the user. Unlike 
+   BSD, Linux does not support overriding of system calls by different modules.
+   This project provides the flexibility for overriding the system calls in 
+   Linux by maintaining a per process system call vector in addition to the 
+   global sys_call_table. The details of this feature are covered in the coming 
+   sections.
+
+*  DESIGN
+
+   >  Adding a new system call vector
+
+      As per our design, a new system call vector can be added through a loadable 
+      module. The loadable module will consist of definitions of all the system calls 
+      to be overridden by this vector. The size of this new system call vector MUST 
+      be greater than or equal to the size of the global sys_call_table. The entries 
+      of the system calls in this new vector which are not being overridden will be 
+      set to NULL. So, when a process which has set its own syscall vector invokes a 
+      system call, it will be checked to see if the corresponding entry in the selected 
+      vector is NULL. If so, the global sys_call_table's entry will be invoked. Else 
+      the overridden system call will be invoked.
+
+      We have defined a new structure 'custom_sys_vector' to store the information 
+      about a newly added system call vector. For every new system call vector added, 
+      a corresponding custom_sys_vector structure variable will be created.
+
+      struct custom_sys_vector {
+	     void *syscall_vector;	// Pointer to a new custom syscall vector.
+	     atomic_t v_count;		// The reference count of the vector.
+	     char *v_name;			// The name of the syscall vector.
+      }
+
+      - syscall_vector: is the actual pointer to the newly defined syscall vector table.
+      - v_count: represents the reference count for the vector which indicates the number 
+                 of processes currently using this vector. The type of this variable is 
+                 atomic_t since locking is needed when updating (incrementing/decrementing) 
+                 this variable. The updation of v_count is discussed in the coming sections.
+      - v_name: represents the name of the syscall vector which is displayed to the user.
+
+      A list 'sys_vector_list' of some constant size (currently 100) is created which holds 
+      the list of all active system call vectors currently being supported. 
+      Whenever a module supporting a new syscall vector is tried to be loaded by 'insmod', 
+      the following checks are done:
+	  
+	  1. If the sys_vector_list is full, insmod should fail.
+	  2. If the name of the syscall vector which this module is trying to add matches with 
+	     any of the existing syscall vectors in the list, insmod should fail. This is because, 
+	     according to our design, the name of the syscall vector should be unique.
+	  
+      After doing the above checks, a custom_sys_vector variable correspoding to this new 
+      syscall vector is created and added to sys_vector_list. The locking details of this list 
+      are explained in the 'LOCKING' section. 
+	  
+      When a module has to be removed by 'rmmod', the reference count of its syscall vector 
+      is checked. If it is zero, the structure is freed and the module is now removed. If 
+      the reference count is not zero, the rmmod fails.
+  
+   >  Listing System Call Vectors
+
+      The user should be able to view the list of all the supported system call vectors. 
+      There will be a new system call 'list_syscall_vectors()' which when called by the 
+      process accesses the above mentioned sys_vector_list and returns a list of all the 
+      supported syscall vectors. 
+
+   >  Selecting a System Call Vector
+
+      From our understanding, there are 3 possible ways to set a system call vector 
+      on a per process basis.
+
+   1. Using an ioctl:
+      For each loadable module which is adding new system call vector(s), we can 
+      define an ioctl such that the hadler for this ioctl is implemented in the 
+      corresponding module. Any process which wants to set a new system call vector 
+      can call the corresponding ioctl to do so.
+   
+      But the problem with this approach is that we will end up defining a new ioctl 
+      for each new loadable module which is an overhead.
+   
+   2. Defining a new system call:
+      We can define a new system call which accepts the name of the system call vector 
+      as an argument. The process can invoke this system call to set its chosen system 
+      call vector.
+   
+   3. Using the exec() system call:
+      A new wrapper call can be added for the exec() system call which in addition 
+      to the actual exec() system call arguments also takes one more argument which 
+      is the name of the system call vector.
+    
+      In our design, we are planning to define a new system call 'set_syscall_vector(char* sysvec_name)' 
+      to set the system call vector. Here, the sysvec_name should be one of the vector 
+      names returned by the list_syscall_vectors system call. This system call handles 
+      most of the functionalities like updation of reference counts of the system call 
+      vectors and process task structure.
+	  
+      This system call module will have two functions namely 'register_sysvec()' and 
+      'unregister_sysvec' which does the functionality of adding a new sysvec to the 
+      sys_vector_list and removing a sysvec from the list respectively. These functions are 
+      exported so that any lodable module which needs to add a new syscall vector can invoke 
+      these functions to update the sys_vector_list.
+   
+      The reference count of a syscall vector is incremented after the task structure updation 
+      and is decremented whenever this process exits.
+   
+   >  Modifying the Process task structure
+
+      In order to keep track of the system call vector which the process has chosen, 
+      we have decided to modify the process task structure to add a new void* pointer 
+      'sysvec_ptr' which will hold the pointer to the corresponding system call vector table. 
+      Hence whenever the process calls the set_syscall_vector, the task structure of the 
+      process is updated to hold the information about the system call vector. Also 
+      the reference count of this syscall vector needs to be incremented.
+   
+      These will be done as follows:
+      
+      * A lock will be grabbed on the sys_vector_list. 
+      * The custom_sys_vector structure variable corresponding to the process chosen system 
+        call vector will be extracted from the 'sys_vector_list' list. 
+      * The 'syscall_vector' pointer of this structure will be assigned to the process task 
+        structure.
+      * Since v_count variable of the custom_sys_vector is of type atomic_t, no need to 
+        specifically grab a lock on it. The locking will be handled internally. The v_count 
+        will be incremented by 1.
+      
+   >  LOCKING
+      In our design, we need 2 spinlocks one for the sys_vector_list and the other for the 
+      reference counts of the syscall vectors. But since we have defined the v_count varibale 
+      as atomic_t its locking is handled internally. Whereas, an explicit locking has to be 
+      done for the sys_vector_list. Any updation to this list needs grabbing its lock, 
+      performing the updation and releasing the lock. 
+	  
+*  CHANGES TO BE DONE TO THE EXISTING SYSTEM CALLS
+
+   > fork(): Currently when the fork() system call is invoked, the task structure of the parent 
+             process is duplicated to the task structure of the child process. According to our 
+             design, the child process should inherit the syscall vector chosen by the parent. 
+             Hence to incorporate this, we need to update the fork system call to copy the 'sysvec_ptr' 
+             field of parent's task structure to the child's task structure. Also, forking a process 
+             will result in incrementing the reference count for the corresponding syscall vector of 
+             the parent.
+			 
+   > exit(): Whenever a process exits, the sysvec_ptr pointer in the process task structure must be 
+             verified. If its value is NULL, then nothing to be done. But if not NULL, it means the 
+             process has chosen a custom syscall vector. Now, since the process is exiting, the 
+             reference count of the selected syscall vector should be decremented by 1. 
+             The exit() system call should be updated to handle the above mentioned scenario.
+			 
+*  INVOKING A SYSTEM CALL
+
+   Currently, whenever a process invokes a system call, the system call number is pushed into the 
+   eax register and the system call's handler is called by dereferecing the global sys_call_table 
+   with the index stored in eax register. To incorporate our design, we need to modify the flow as follows:
+   
+   1. Instead of directly dereferencing the global sys_call_table, the current processe's task structure 
+      is dereferenced to check if the sysvec_ptr variable is NULL. It yes, then proceed with the exisiting flow.
+   2. If not NULL, then dereference this new sysvector using the value stored in eax. Again there are two 
+      steps here:
+      > If the handler for the invoked system call is NULL in the new system call vector, then invoke the 
+        handler of the global sys_call_table.
+      > If not NULL, then invoke this non NULL handler.
+	  
+*  TESTING
+   
+    Initially, we would define a set of system call vectors using multiple lodable modules and
+    create processes using these syscall vectors. LTP can be executed to verify if these new syscalls
+    are handled properly.
+	  
+*  REFERENCES
+  
+   1. https://github.com/freebsd/freebsd
+   2. http://lxr.fsl.cs.sunysb.edu/linux/source/
+	

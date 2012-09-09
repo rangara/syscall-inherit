@@ -1,0 +1,39 @@
+1. User program to list existing vectors.
+   --> ./listVectors
+
+2. Default syscall_table
+   --> ./logging
+
+3. Show error when prohibited syscall is overwritten.
+   --> insmod vector_prohibit.ko
+
+4. Forking where child inherits syscall vector from parent. show refcounts here.
+   --> ./refcounting vector_refcount
+
+5. Do not allow process to set syscall vector twice.
+   --> ./setVectorOnce vector_refcount
+   --> ./setVectorOnce vector_refcount vector_logging
+
+6. Allow child to set its own syscall vector, atmost once
+   --> ./setVectorOnceChild vector_refcount
+   --> ./setVectorOnceChild vector_refcount vector_readonly
+
+7. exec should work properly.
+   --> ./exec vector_logging
+
+8. Logging system calls.
+   --> ./logging vector_logging
+
+9. Snoop syscall vector.
+   --> ./snoop vector_snoop (run as user "test")
+
+10. Read-only system call vector. (example where some syscalls are blocked)
+    --> ./readonly vector_readonly
+
+11. Access control system call vector.
+    --> ./accessControl vector_access (run as root)
+    --> ./accessControl vector_access (run as user)
+
+12. Parameter validation
+    --> ./paramvalidate vector_params
+
